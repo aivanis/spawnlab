@@ -1,8 +1,11 @@
-FROM runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404
+FROM runpod/pytorch:1.0.3-cu1281-torch260-ubuntu2404
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV OPENCV_IO_ENABLE_OPENEXR=1
 ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# cu126+torch2.6+cp312 pre-built wheel base URL
+ARG WHEELS=https://github.com/PozzettiAndrea/cuda-wheels/releases/download
 
 # System dependencies (PyTorch already in base image)
 RUN apt-get update && apt-get install -y \
@@ -20,30 +23,17 @@ RUN pip install git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e402
 
 RUN pip install pillow-simd
 
-# flash-attn (latest, compatible with torch 2.8.0 + cu128)
-RUN pip install flash-attn
+# Pre-built GPU extension wheels (cu126, torch2.6, cp312, linux)
+RUN pip install \
+    "${WHEELS}/flash_attn-latest/flash_attn-2.8.3%2Bcu126torch2.6-cp312-cp312-manylinux_2_34_x86_64.manylinux_2_35_x86_64.whl" \
+    "${WHEELS}/nvdiffrast-latest/nvdiffrast-0.4.0%2Bcu126torch2.6-cp312-cp312-manylinux_2_34_x86_64.manylinux_2_35_x86_64.whl" \
+    "${WHEELS}/nvdiffrec_render-latest/nvdiffrec_render-0.0.1%2Bcu126torch2.6-cp312-cp312-manylinux_2_34_x86_64.manylinux_2_35_x86_64.whl" \
+    "${WHEELS}/cumesh-latest/cumesh-0.0.1%2Bcu126torch2.6-cp312-cp312-manylinux_2_35_x86_64.whl" \
+    "${WHEELS}/flex_gemm-latest/flex_gemm-1.0.0%2Bcu126torch2.6-cp312-cp312-manylinux_2_34_x86_64.manylinux_2_35_x86_64.whl" \
+    "${WHEELS}/o_voxel-latest/o_voxel-0.0.1%2Bcu126torch2.6-cp312-cp312-manylinux_2_34_x86_64.manylinux_2_35_x86_64.whl"
 
-# Build GPU extensions (from TRELLIS.2 setup.sh)
-RUN mkdir -p /tmp/extensions
-
-RUN git clone -b v0.4.0 https://github.com/NVlabs/nvdiffrast.git /tmp/extensions/nvdiffrast && \
-    pip install /tmp/extensions/nvdiffrast --no-build-isolation
-
-RUN git clone -b renderutils https://github.com/JeffreyXiang/nvdiffrec.git /tmp/extensions/nvdiffrec && \
-    pip install /tmp/extensions/nvdiffrec --no-build-isolation
-
-RUN git clone https://github.com/JeffreyXiang/CuMesh.git /tmp/extensions/CuMesh --recursive && \
-    pip install /tmp/extensions/CuMesh --no-build-isolation
-
-RUN git clone https://github.com/JeffreyXiang/FlexGEMM.git /tmp/extensions/FlexGEMM --recursive && \
-    pip install /tmp/extensions/FlexGEMM --no-build-isolation
-
-# Clone TRELLIS.2 repo (includes o-voxel submodule)
+# Clone TRELLIS.2 repo and install (o-voxel already installed via wheel above)
 RUN git clone --recursive https://github.com/microsoft/TRELLIS.2.git /app/TRELLIS.2
-
-RUN cp -r /app/TRELLIS.2/o-voxel /tmp/extensions/o-voxel && \
-    pip install /tmp/extensions/o-voxel --no-build-isolation
-
 RUN pip install -e /app/TRELLIS.2
 
 # Download all model weights into image
