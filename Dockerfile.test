@@ -29,7 +29,7 @@ RUN pip install \
     "${WHEELS}/o_voxel-latest/o_voxel-0.0.1%2Bcu126torch2.6-cp312-cp312-manylinux_2_34_x86_64.manylinux_2_35_x86_64.whl"
 
 RUN git clone --recursive https://github.com/microsoft/TRELLIS.2.git /app/TRELLIS.2
-RUN pip install -e /app/TRELLIS.2
+ENV PYTHONPATH="/app/TRELLIS.2:${PYTHONPATH}"
 
 # Smoke test — no model weights needed
 RUN python -c "

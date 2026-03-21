@@ -32,9 +32,9 @@ RUN pip install \
     "${WHEELS}/flex_gemm-latest/flex_gemm-1.0.0%2Bcu126torch2.6-cp312-cp312-manylinux_2_34_x86_64.manylinux_2_35_x86_64.whl" \
     "${WHEELS}/o_voxel-latest/o_voxel-0.0.1%2Bcu126torch2.6-cp312-cp312-manylinux_2_34_x86_64.manylinux_2_35_x86_64.whl"
 
-# Clone TRELLIS.2 repo and install (o-voxel already installed via wheel above)
+# Clone TRELLIS.2 repo (no setup.py — add to PYTHONPATH instead)
 RUN git clone --recursive https://github.com/microsoft/TRELLIS.2.git /app/TRELLIS.2
-RUN pip install -e /app/TRELLIS.2
+ENV PYTHONPATH="/app/TRELLIS.2:${PYTHONPATH}"
 
 # Download all model weights into image
 
