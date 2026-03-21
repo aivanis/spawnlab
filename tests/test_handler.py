@@ -102,44 +102,33 @@ try:
 except ImportError as e:
     fail(f"runpod: {e}")
 
-# ── 2. Model weights present ──────────────────────────────────────────────────
+# ── 2. Model weights present (HF cache) ──────────────────────────────────────
 
 section("2. Model weights present")
 
-MODEL_DIR = "/app/models/TRELLIS.2-4B"
-expected_ckpts = [
-    "pipeline.json",
-    "ckpts/ss_flow_img_dit_1_3B_64_bf16.safetensors",
-    "ckpts/slat_flow_img2shape_dit_1_3B_512_bf16.safetensors",
-    "ckpts/slat_flow_img2shape_dit_1_3B_1024_bf16.safetensors",
-    "ckpts/slat_flow_imgshape2tex_dit_1_3B_512_bf16.safetensors",
-    "ckpts/slat_flow_imgshape2tex_dit_1_3B_1024_bf16.safetensors",
-    "ckpts/shape_dec_next_dc_f16c32_fp16.safetensors",
-    "ckpts/tex_dec_next_dc_f16c32_fp16.safetensors",
-    "ckpts/shape_enc_next_dc_f16c32_fp16.safetensors",
-    "ckpts/tex_enc_next_dc_f16c32_fp16.safetensors",
-]
-for f in expected_ckpts:
-    path = os.path.join(MODEL_DIR, f)
-    if os.path.exists(path):
-        ok(f"{f} ({os.path.getsize(path) / 1e6:.0f} MB)")
-    else:
-        fail(f"Missing: {path}")
-
-# Check HF cache for external models
 import glob
-hf_cache = os.path.expanduser("~/.cache/huggingface/hub")
+hf_cache = os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
+hf_hub = os.path.join(hf_cache, "hub")
 
-def hf_model_cached(name):
-    safe_name = name.replace("/", "--")
-    matches = glob.glob(os.path.join(hf_cache, f"models--{safe_name}*"))
-    return len(matches) > 0
+def hf_model_cached(repo_id):
+    safe_name = "models--" + repo_id.replace("/", "--")
+    path = os.path.join(hf_hub, safe_name)
+    if not os.path.exists(path):
+        return False, 0
+    size = sum(
+        os.path.getsize(os.path.join(r, f))
+        for r, _, files in os.walk(path)
+        for f in files
+        if not os.path.islink(os.path.join(r, f))
+    )
+    return True, size
 
-for model in ["microsoft/TRELLIS-image-large", "facebook/dinov3-vitl16-pretrain-lvd1689m", "briaai/RMBG-2.0"]:
-    if hf_model_cached(model):
-        ok(f"HF cache: {model}")
+for model in ["camenduru/TRELLIS.2-4B", "camenduru/dinov3-vitl16-pretrain-lvd1689m", "camenduru/RMBG-2.0"]:
+    cached, size = hf_model_cached(model)
+    if cached:
+        ok(f"{model} ({size / 1e9:.1f} GB)")
     else:
-        fail(f"HF cache missing: {model}")
+        fail(f"HF cache missing: {model} (expected in {hf_hub})")
 
 # ── 3. Pipeline loads ─────────────────────────────────────────────────────────
 
@@ -147,7 +136,49 @@ section("3. Pipeline loads into GPU memory")
 
 t0 = time.time()
 try:
-    pipeline = Trellis2ImageTo3DPipeline.from_pretrained(MODEL_DIR)
+    # Fix meta-tensor issue: DeviceContext.__torch_function__ routes all tensor ops
+    # to meta device. SwinTransformer in BiRefNet calls linspace(...).item() which
+    # fails on meta tensors. Temporarily redirect meta→CPU during BiRefNet load.
+    import contextlib
+    from torch.utils._device import DeviceContext as _DevCtx
+    from transformers import AutoModelForImageSegmentation as _AMIS
+    from torchvision import transforms as _T
+    import trellis2.pipelines.rembg as _rembg_pkg
+
+    _CREATION_OPS = {getattr(torch, n) for n in
+        ('empty', 'zeros', 'ones', 'full', 'rand', 'randn',
+         'arange', 'linspace', 'eye', 'zeros_like', 'ones_like', 'empty_like')
+        if hasattr(torch, n)}
+    _orig_dcf = _DevCtx.__torch_function__
+    def _meta_cpu_patch(self, func, types, args=(), kwargs=None):
+        if kwargs is None: kwargs = {}
+        if func in _CREATION_OPS and str(getattr(self, 'device', '')) == 'meta':
+            kwargs.setdefault('device', 'cpu')
+            return func(*args, **kwargs)
+        return _orig_dcf(self, func, types, args, kwargs)
+    _DevCtx.__torch_function__ = _meta_cpu_patch
+    # Also patch mark_tied_weights_as_initialized: BiRefNet's __init__ skips post_init()
+    from transformers import PreTrainedModel as _PTM
+    _orig_mark_tied = _PTM.mark_tied_weights_as_initialized
+    def _safe_mark_tied(self, loading_info):
+        if not hasattr(self, 'all_tied_weights_keys'):
+            self.post_init()
+        return _orig_mark_tied(self, loading_info)
+    _PTM.mark_tied_weights_as_initialized = _safe_mark_tied
+    try:
+        _birefnet_model = _AMIS.from_pretrained("camenduru/RMBG-2.0", trust_remote_code=True)
+    finally:
+        _DevCtx.__torch_function__ = _orig_dcf
+        _PTM.mark_tied_weights_as_initialized = _orig_mark_tied
+    _birefnet_model.eval()
+    class _PreloadedBiRefNet(_rembg_pkg.BiRefNet):
+        def __init__(self, model_name=None):
+            self.model = _birefnet_model
+            self.transform_image = _T.Compose([_T.Resize((1024,1024)), _T.ToTensor(), _T.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])])
+    _rembg_pkg.BiRefNet = _PreloadedBiRefNet
+
+    pipeline = Trellis2ImageTo3DPipeline.from_pretrained("camenduru/TRELLIS.2-4B")
+    pipeline.low_vram = False
     pipeline.cuda()
     elapsed = time.time() - t0
     vram = torch.cuda.memory_allocated() / 1e9
@@ -159,22 +190,19 @@ except Exception as e:
 
 section("4. Handler input validation")
 
-# Import handler module directly (bypasses runpod.serverless.start)
+# Import handler — pipeline already loaded above, patch to reuse it
 sys.path.insert(0, "/app")
-# Monkey-patch runpod.serverless.start so importing handler doesn't block
 import runpod
-runpod.serverless.start = lambda config: None
+runpod.serverless.start = lambda config: None  # prevent blocking
 
-# Re-use already-loaded pipeline by patching the module-level variable
-import importlib.util, types
-spec = importlib.util.spec_from_file_location("handler_module", "/app/handler.py")
-handler_mod = types.ModuleType("handler_module")
-# Inject the already-loaded pipeline so it doesn't reload
-handler_mod.pipeline = pipeline
-exec(open("/app/handler.py").read().replace(
-    "pipeline = Trellis2ImageTo3DPipeline.from_pretrained",
-    "pipeline = pipeline or Trellis2ImageTo3DPipeline.from_pretrained"
-), handler_mod.__dict__)
+# Patch handler to reuse the already-loaded pipeline and birefnet
+import trellis2.pipelines as _pip
+_orig_from_pretrained = _pip.Trellis2ImageTo3DPipeline.from_pretrained.__func__ if hasattr(_pip.Trellis2ImageTo3DPipeline.from_pretrained, '__func__') else None
+
+import unittest.mock as _mock
+with _mock.patch("trellis2.pipelines.Trellis2ImageTo3DPipeline.from_pretrained", return_value=pipeline), \
+     _mock.patch("transformers.AutoModelForImageSegmentation.from_pretrained", return_value=_birefnet_model):
+    import handler as handler_mod
 
 handler = handler_mod.handler
 

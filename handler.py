@@ -14,26 +14,101 @@ from transformers import AutoModelForImageSegmentation
 from trellis2.pipelines import Trellis2ImageTo3DPipeline
 import o_voxel
 
-# ── Load RMBG background removal model ───────────────────────────────────────
-print("Loading RMBG-2.0...")
-birefnet = AutoModelForImageSegmentation.from_pretrained(
-    "camenduru/RMBG-2.0", trust_remote_code=True
-)
+# ── Fix: redirect meta-device tensor ops to CPU during BiRefNet load ──────────
+# BiRefNet's SwinTransformer calls torch.linspace(...).item() in __init__.
+# When from_pretrained uses init_empty_weights() (meta-device context), linspace
+# returns a meta tensor, and .item() raises RuntimeError.
+# Root cause: DeviceContext.__torch_function__ adds device='meta' to all tensor
+# creation ops via PyTorch's TorchFunctionMode dispatch (bypasses Python-level
+# torch.linspace patches). Fix: temporarily redirect meta→CPU in DeviceContext,
+# load BiRefNet (SwinTransformer __init__ now runs on CPU), then restore.
+import contextlib
+from torch.utils._device import DeviceContext as _DevCtx
+
+_TENSOR_CREATION_OPS = None  # populated lazily after torch is imported
+
+_TENSOR_CREATION_OPS = None  # populated lazily
+
+@contextlib.contextmanager
+def _meta_to_cpu_ctx():
+    """Temporarily redirect tensor creation ops from meta device to CPU.
+    Also patches mark_tied_weights_as_initialized to auto-call post_init() when
+    all_tied_weights_keys is missing (BiRefNet's __init__ skips post_init())."""
+    global _TENSOR_CREATION_OPS
+    if _TENSOR_CREATION_OPS is None:
+        _TENSOR_CREATION_OPS = {
+            getattr(torch, n) for n in
+            ('empty', 'zeros', 'ones', 'full', 'rand', 'randn',
+             'arange', 'linspace', 'eye', 'zeros_like', 'ones_like', 'empty_like')
+            if hasattr(torch, n)
+        }
+
+    # Patch 1: redirect meta tensor creation to CPU
+    _orig_dcf = _DevCtx.__torch_function__
+    def _patched_dcf(self, func, types, args=(), kwargs=None):
+        if kwargs is None:
+            kwargs = {}
+        if func in _TENSOR_CREATION_OPS and str(getattr(self, 'device', '')) == 'meta':
+            kwargs.setdefault('device', 'cpu')
+            return func(*args, **kwargs)
+        return _orig_dcf(self, func, types, args, kwargs)
+    _DevCtx.__torch_function__ = _patched_dcf
+
+    # Patch 2: ensure all_tied_weights_keys exists (BiRefNet skips post_init)
+    from transformers import PreTrainedModel as _PTM
+    _orig_mark_tied = _PTM.mark_tied_weights_as_initialized
+    def _safe_mark_tied(self, loading_info):
+        if not hasattr(self, 'all_tied_weights_keys'):
+            self.post_init()  # BiRefNet forgot to call this
+        return _orig_mark_tied(self, loading_info)
+    _PTM.mark_tied_weights_as_initialized = _safe_mark_tied
+
+    try:
+        yield
+    finally:
+        _DevCtx.__torch_function__ = _orig_dcf
+        _PTM.mark_tied_weights_as_initialized = _orig_mark_tied
+
+print("Loading BiRefNet background removal model...")
+with _meta_to_cpu_ctx():
+    _birefnet_model = AutoModelForImageSegmentation.from_pretrained(
+        "camenduru/RMBG-2.0", trust_remote_code=True
+    )
+_birefnet_model.eval()
+print("BiRefNet ready.")
+
+import trellis2.pipelines.rembg as _rembg_pkg
+
+class _PreloadedBiRefNet(_rembg_pkg.BiRefNet):
+    """Wraps the already-loaded BiRefNet model — no tensor creation in __init__,
+    safe to instantiate inside accelerate's meta-device context."""
+    def __init__(self, model_name=None):
+        self.model = _birefnet_model
+        self.transform_image = transforms.Compose([
+            transforms.Resize((1024, 1024)),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        ])
+
+_rembg_pkg.BiRefNet = _PreloadedBiRefNet
+
+# ── Load TRELLIS.2 pipeline (BiRefNet already loaded, no meta-tensor issue) ───
+print("Loading TRELLIS.2 pipeline...")
+pipeline = Trellis2ImageTo3DPipeline.from_pretrained("camenduru/TRELLIS.2-4B")
+pipeline.low_vram = False
+pipeline.cuda()
+print("Pipeline ready.")
+
+# ── Move pre-loaded BiRefNet to GPU for inference ─────────────────────────────
+birefnet = _birefnet_model
 birefnet.to("cuda")
 birefnet.eval()
+pipeline.rembg_model = None  # we handle background removal ourselves
 
 transform_image = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
 ])
-
-# ── Load TRELLIS.2 pipeline ───────────────────────────────────────────────────
-print("Loading TRELLIS.2 pipeline...")
-pipeline = Trellis2ImageTo3DPipeline.from_pretrained("camenduru/TRELLIS.2-4B")
-pipeline.rembg_model = None  # we handle background removal ourselves
-pipeline.low_vram = True
-pipeline.cuda()
-print("Pipeline ready.")
 
 # ── Background removal ────────────────────────────────────────────────────────
 
