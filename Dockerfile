@@ -40,9 +40,10 @@ RUN GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 --branch dev \
 ENV PYTHONPATH="/app/TRELLIS.2:${PYTHONPATH}"
 
 # Pre-download all models to HF cache (camenduru public mirrors, no token needed)
-RUN HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli download camenduru/TRELLIS.2-4B
-RUN HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli download camenduru/dinov3-vitl16-pretrain-lvd1689m
-RUN HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli download camenduru/RMBG-2.0
+ENV HF_HUB_ENABLE_HF_TRANSFER=1
+RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('camenduru/TRELLIS.2-4B')"
+RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('camenduru/dinov3-vitl16-pretrain-lvd1689m')"
+RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('camenduru/RMBG-2.0')"
 
 WORKDIR /app
 COPY handler.py .
