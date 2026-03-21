@@ -25,13 +25,13 @@ RUN pip install git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e402
 RUN pip install pillow-simd
 
 # Pre-built GPU extension wheels (camenduru mirrors, torch2.8+cu128, cp312)
-RUN pip install --no-cache-dir \
-    "${CWHEELS}/cumesh-0.0.1-cp312-cp312-linux_x86_64.whl" \
-    "${CWHEELS}/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl" \
-    "${CWHEELS}/flex_gemm-0.0.1-cp312-cp312-linux_x86_64.whl" \
-    "${CWHEELS}/nvdiffrast-0.4.0-cp312-cp312-linux_x86_64.whl" \
-    "${CWHEELS}/nvdiffrec_render-0.0.0-cp312-cp312-linux_x86_64.whl" \
-    "${CWHEELS}/o_voxel-0.0.1-cp312-cp312-linux_x86_64.whl"
+# Install separately to avoid dependency conflicts between cumesh and o-voxel
+RUN pip install --no-cache-dir "${CWHEELS}/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl"
+RUN pip install --no-cache-dir "${CWHEELS}/nvdiffrast-0.4.0-cp312-cp312-linux_x86_64.whl"
+RUN pip install --no-cache-dir "${CWHEELS}/nvdiffrec_render-0.0.0-cp312-cp312-linux_x86_64.whl"
+RUN pip install --no-cache-dir "${CWHEELS}/flex_gemm-0.0.1-cp312-cp312-linux_x86_64.whl"
+RUN pip install --no-cache-dir --no-deps "${CWHEELS}/cumesh-0.0.1-cp312-cp312-linux_x86_64.whl"
+RUN pip install --no-cache-dir --no-deps "${CWHEELS}/o_voxel-0.0.1-cp312-cp312-linux_x86_64.whl"
 
 # Clone camenduru's TRELLIS.2 fork (HF-compatible, correct pipeline.json)
 RUN GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 --branch dev \
