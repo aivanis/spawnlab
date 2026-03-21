@@ -1,0 +1,50 @@
+FROM runpod/pytorch:1.0.3-cu1281-torch260-ubuntu2404
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV OPENCV_IO_ENABLE_OPENEXR=1
+ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+ARG WHEELS=https://github.com/PozzettiAndrea/cuda-wheels/releases/download
+
+RUN apt-get update && apt-get install -y \
+    git git-lfs \
+    libjpeg-dev libgl1-mesa-glx libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install \
+    imageio imageio-ffmpeg tqdm easydict opencv-python-headless ninja \
+    trimesh transformers tensorboard pandas lpips zstandard kornia timm \
+    runpod requests huggingface_hub
+
+RUN pip install git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8
+
+RUN pip install pillow-simd
+
+RUN pip install \
+    "${WHEELS}/flash_attn-latest/flash_attn-2.8.3%2Bcu126torch2.6-cp312-cp312-manylinux_2_34_x86_64.manylinux_2_35_x86_64.whl" \
+    "${WHEELS}/nvdiffrast-latest/nvdiffrast-0.4.0%2Bcu126torch2.6-cp312-cp312-manylinux_2_34_x86_64.manylinux_2_35_x86_64.whl" \
+    "${WHEELS}/nvdiffrec_render-latest/nvdiffrec_render-0.0.1%2Bcu126torch2.6-cp312-cp312-manylinux_2_34_x86_64.manylinux_2_35_x86_64.whl" \
+    "${WHEELS}/cumesh-latest/cumesh-0.0.1%2Bcu126torch2.6-cp312-cp312-manylinux_2_35_x86_64.whl" \
+    "${WHEELS}/flex_gemm-latest/flex_gemm-1.0.0%2Bcu126torch2.6-cp312-cp312-manylinux_2_34_x86_64.manylinux_2_35_x86_64.whl" \
+    "${WHEELS}/o_voxel-latest/o_voxel-0.0.1%2Bcu126torch2.6-cp312-cp312-manylinux_2_34_x86_64.manylinux_2_35_x86_64.whl"
+
+RUN git clone --recursive https://github.com/microsoft/TRELLIS.2.git /app/TRELLIS.2
+RUN pip install -e /app/TRELLIS.2
+
+# Smoke test — no model weights needed
+RUN python -c "
+import torch
+print(f'torch: {torch.__version__}')
+print(f'CUDA available: {torch.cuda.is_available()}')
+import flash_attn; print(f'flash_attn: {flash_attn.__version__}')
+import nvdiffrast; print('nvdiffrast: ok')
+import nvdiffrec_render; print('nvdiffrec_render: ok')
+import cumesh; print('cumesh: ok')
+import flex_gemm; print('flex_gemm: ok')
+import o_voxel; print('o_voxel: ok')
+from trellis2.pipelines import Trellis2ImageTo3DPipeline; print('trellis2 pipeline: ok')
+print('All imports OK')
+"
+
+WORKDIR /app
+COPY handler.py .
