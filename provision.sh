@@ -31,8 +31,6 @@ pip install --no-cache-dir \
 pip install --no-cache-dir \
     git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8
 
-pip install --no-cache-dir pillow-simd
-
 # --- Clone TRELLIS.2 ---
 if [ ! -d /workspace/TRELLIS.2 ]; then
     echo "=== Cloning TRELLIS.2 ==="
