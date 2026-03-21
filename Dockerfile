@@ -1,68 +1,48 @@
-FROM runpod/pytorch:1.0.3-cu1281-torch260-ubuntu2404
-
-# HuggingFace token — required for gated models (facebook/dinov3-vitl16-pretrain-lvd1689m)
-# Pass at build time: docker build --build-arg HF_TOKEN=hf_xxx ...
-ARG HF_TOKEN
-ENV HF_TOKEN=${HF_TOKEN}
+FROM runpod/pytorch:1.0.3-cu1281-torch280-ubuntu2404
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV OPENCV_IO_ENABLE_OPENEXR=1
 ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+ENV HF_HOME=/app/cache
 
-# cu126+torch2.6+cp312 pre-built wheel base URL
-ARG WHEELS=https://github.com/PozzettiAndrea/cuda-wheels/releases/download
+# Camenduru wheel base URL (torch2.8+cu128, cp312, linux)
+ARG CWHEELS=https://github.com/camenduru/wheels/releases/download/trellis2
 
-# System dependencies (PyTorch already in base image)
+# System dependencies
 RUN apt-get update && apt-get install -y \
-    git git-lfs \
-    libjpeg-dev libgl1 libglib2.0-0 \
+    git git-lfs wget curl aria2 \
+    libjpeg-dev libgl1 libglib2.0-0 libegl1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Basic ML dependencies (from TRELLIS.2 setup.sh --basic)
-RUN pip install \
-    imageio imageio-ffmpeg tqdm easydict opencv-python-headless ninja \
-    trimesh transformers tensorboard pandas lpips zstandard kornia timm \
-    runpod requests huggingface_hub
+# ML dependencies
+RUN pip install --no-cache-dir \
+    imageio imageio-ffmpeg tqdm easydict opencv-python-headless \
+    trimesh transformers zstandard kornia timm \
+    plyfile runpod requests hf_transfer huggingface_hub
 
 RUN pip install git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8
 
 RUN pip install pillow-simd
 
-# Pre-built GPU extension wheels (cu126, torch2.6, cp312, linux)
-RUN pip install \
-    "${WHEELS}/flash_attn-latest/flash_attn-2.8.3%2Bcu126torch2.6-cp312-cp312-manylinux_2_34_x86_64.manylinux_2_35_x86_64.whl" \
-    "${WHEELS}/nvdiffrast-latest/nvdiffrast-0.4.0%2Bcu126torch2.6-cp312-cp312-manylinux_2_34_x86_64.manylinux_2_35_x86_64.whl" \
-    "${WHEELS}/nvdiffrec_render-latest/nvdiffrec_render-0.0.1%2Bcu126torch2.6-cp312-cp312-manylinux_2_34_x86_64.manylinux_2_35_x86_64.whl" \
-    "${WHEELS}/cumesh-latest/cumesh-0.0.1%2Bcu126torch2.6-cp312-cp312-manylinux_2_35_x86_64.whl" \
-    "${WHEELS}/flex_gemm-latest/flex_gemm-1.0.0%2Bcu126torch2.6-cp312-cp312-manylinux_2_34_x86_64.manylinux_2_35_x86_64.whl" \
-    "${WHEELS}/o_voxel-latest/o_voxel-0.0.1%2Bcu126torch2.6-cp312-cp312-manylinux_2_34_x86_64.manylinux_2_35_x86_64.whl"
+# Pre-built GPU extension wheels (camenduru mirrors, torch2.8+cu128, cp312)
+RUN pip install --no-cache-dir \
+    "${CWHEELS}/cumesh-0.0.1-cp312-cp312-linux_x86_64.whl" \
+    "${CWHEELS}/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl" \
+    "${CWHEELS}/flex_gemm-0.0.1-cp312-cp312-linux_x86_64.whl" \
+    "${CWHEELS}/nvdiffrast-0.4.0-cp312-cp312-linux_x86_64.whl" \
+    "${CWHEELS}/nvdiffrec_render-0.0.0-cp312-cp312-linux_x86_64.whl" \
+    "${CWHEELS}/o_voxel-0.0.1-cp312-cp312-linux_x86_64.whl"
 
-# Clone TRELLIS.2 repo (no setup.py — add to PYTHONPATH instead)
-RUN git clone --recursive https://github.com/microsoft/TRELLIS.2.git /app/TRELLIS.2
+# Clone camenduru's TRELLIS.2 fork (HF-compatible, correct pipeline.json)
+RUN GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 --branch dev \
+    https://github.com/camenduru/TRELLIS.2-hf /app/TRELLIS.2
+
 ENV PYTHONPATH="/app/TRELLIS.2:${PYTHONPATH}"
 
-# Download all model weights into image
-
-# Main TRELLIS.2-4B weights
-RUN python -c "\
-from huggingface_hub import snapshot_download; \
-snapshot_download('microsoft/TRELLIS.2-4B', local_dir='/app/models/TRELLIS.2-4B')"
-
-# Sparse structure decoder from original TRELLIS repo (referenced in pipeline.json)
-RUN python -c "\
-from huggingface_hub import snapshot_download; \
-snapshot_download('microsoft/TRELLIS-image-large', \
-    allow_patterns=['ckpts/ss_dec_conv3d_16l8_fp16*'])"
-
-# DINOv3 image encoder (image_cond_model in pipeline.json)
-RUN python -c "\
-from huggingface_hub import snapshot_download; \
-snapshot_download('facebook/dinov3-vitl16-pretrain-lvd1689m')"
-
-# Background removal model (rembg_model in pipeline.json)
-RUN python -c "\
-from huggingface_hub import snapshot_download; \
-snapshot_download('briaai/RMBG-2.0')"
+# Pre-download all models to HF cache (camenduru public mirrors, no token needed)
+RUN HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli download camenduru/TRELLIS.2-4B
+RUN HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli download camenduru/dinov3-vitl16-pretrain-lvd1689m
+RUN HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli download camenduru/RMBG-2.0
 
 WORKDIR /app
 COPY handler.py .
