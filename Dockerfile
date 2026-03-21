@@ -46,10 +46,28 @@ RUN cp -r /app/TRELLIS.2/o-voxel /tmp/extensions/o-voxel && \
 
 RUN pip install -e /app/TRELLIS.2
 
-# Download model weights into image
+# Download all model weights into image
+
+# Main TRELLIS.2-4B weights
 RUN python -c "\
 from huggingface_hub import snapshot_download; \
 snapshot_download('microsoft/TRELLIS.2-4B', local_dir='/app/models/TRELLIS.2-4B')"
+
+# Sparse structure decoder from original TRELLIS repo (referenced in pipeline.json)
+RUN python -c "\
+from huggingface_hub import snapshot_download; \
+snapshot_download('microsoft/TRELLIS-image-large', \
+    allow_patterns=['ckpts/ss_dec_conv3d_16l8_fp16*'])"
+
+# DINOv3 image encoder (image_cond_model in pipeline.json)
+RUN python -c "\
+from huggingface_hub import snapshot_download; \
+snapshot_download('facebook/dinov3-vitl16-pretrain-lvd1689m')"
+
+# Background removal model (rembg_model in pipeline.json)
+RUN python -c "\
+from huggingface_hub import snapshot_download; \
+snapshot_download('briaai/RMBG-2.0')"
 
 WORKDIR /app
 COPY handler.py .
