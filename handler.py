@@ -227,8 +227,10 @@ def handler(job):
     torch.cuda.empty_cache()
 
     # --- Export GLB ---
-    try:
-        glb = o_voxel.postprocess.to_glb(
+    # remesh=True runs CuMesh cleanup for better topology; fall back to False
+    # if it fails (e.g. degenerate mesh from simple input, CUDA config error).
+    def _to_glb(remesh):
+        return o_voxel.postprocess.to_glb(
             vertices=mesh.vertices,
             faces=mesh.faces,
             attr_volume=mesh.attrs,
@@ -238,11 +240,17 @@ def handler(job):
             aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
             decimation_target=decimation,
             texture_size=texture_size,
-            remesh=True,
+            remesh=remesh,
             remesh_band=1,
             remesh_project=0,
             use_tqdm=False,
         )
+
+    try:
+        try:
+            glb = _to_glb(remesh=True)
+        except Exception:
+            glb = _to_glb(remesh=False)
 
         tmp_path = f"/tmp/trellis_{uuid.uuid4().hex[:8]}.glb"
         glb.export(tmp_path, extension_webp=True)
