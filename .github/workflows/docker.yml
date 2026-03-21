@@ -1,51 +1,18 @@
-name: Build & Deploy
+name: Deploy
 
 on:
   push:
     branches: [main]
     paths:
       - "handler.py"
-      - "Dockerfile"
       - "src/**"
       - "wrangler.toml"
+      - "provision.sh"
 
 jobs:
-  docker:
-    name: Build & push Docker image
-    runs-on: ubuntu-latest
-    outputs:
-      image_tag: ${{ steps.meta.outputs.version }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ secrets.DOCKERHUB_USERNAME }}/trellis2-worker
-          tags: |
-            type=sha,prefix=,format=short
-            type=raw,value=latest
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Build and push
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/trellis2-worker:latest
-          cache-to: type=inline
-
   cloudflare:
     name: Deploy Cloudflare Worker
     runs-on: ubuntu-latest
-    needs: docker
     steps:
       - uses: actions/checkout@v4
 
