@@ -10,7 +10,7 @@ ARG WHEELS=https://github.com/PozzettiAndrea/cuda-wheels/releases/download
 # System dependencies (PyTorch already in base image)
 RUN apt-get update && apt-get install -y \
     git git-lfs \
-    libjpeg-dev libgl1-mesa-glx libglib2.0-0 \
+    libjpeg-dev libgl1 libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Basic ML dependencies (from TRELLIS.2 setup.sh --basic)
