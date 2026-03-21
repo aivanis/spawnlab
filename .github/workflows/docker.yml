@@ -8,6 +8,7 @@ on:
       - "src/**"
       - "wrangler.toml"
       - "provision.sh"
+  workflow_dispatch:
 
 jobs:
   cloudflare:
