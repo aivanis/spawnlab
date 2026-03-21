@@ -5,8 +5,8 @@ compatibility_flags = ["nodejs_compat"]
 
 [[kv_namespaces]]
 binding = "JOBS"
-id = "<KV_NAMESPACE_ID>"
-preview_id = "<KV_PREVIEW_ID>"
+id = "6ea018fb02dd4d5eba701758194ea6b3"
+preview_id = "c74f0b4dc9c044c09b311a0e46459533"
 
 [[r2_buckets]]
 binding = "ASSETS"
@@ -16,7 +16,7 @@ bucket_name = "spawnlab-assets"
 crons = ["* * * * *"]
 
 [vars]
-WORKER_URL = "https://spawnlab-worker.<your-subdomain>.workers.dev"
+WORKER_URL = "https://spawnlab-worker.anivanis.workers.dev"
 
 # Secrets (set via: wrangler secret put <NAME>)
 # WORKER_SECRET  — shared secret between CF Worker and GPU workers
