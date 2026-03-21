@@ -1,21 +1,14 @@
-FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+FROM runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV OPENCV_IO_ENABLE_OPENEXR=1
 ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-# System dependencies
+# System dependencies (PyTorch already in base image)
 RUN apt-get update && apt-get install -y \
-    python3.10 python3.10-dev python3-pip \
     git git-lfs \
     libjpeg-dev libgl1-mesa-glx libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
-
-RUN ln -sf /usr/bin/python3.10 /usr/local/bin/python && \
-    ln -sf /usr/bin/python3.10 /usr/local/bin/python3
-
-# PyTorch 2.6.0 + CUDA 12.4
-RUN pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
 
 # Basic ML dependencies (from TRELLIS.2 setup.sh --basic)
 RUN pip install \
@@ -27,8 +20,8 @@ RUN pip install git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e402
 
 RUN pip install pillow-simd
 
-# flash-attn (pre-built wheel for cu124 + torch 2.6.0)
-RUN pip install flash-attn==2.7.3
+# flash-attn (latest, compatible with torch 2.8.0 + cu128)
+RUN pip install flash-attn
 
 # Build GPU extensions (from TRELLIS.2 setup.sh)
 RUN mkdir -p /tmp/extensions
