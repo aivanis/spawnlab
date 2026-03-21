@@ -19,7 +19,6 @@
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const VAST_API = "https://console.vast.ai/api/v0";
 const STALL_TIMEOUT_MS = 120_000; // requeue if no heartbeat for 2 min
 const JOB_TTL_SECONDS  = 86400;   // KV TTL: 24 h
 
@@ -309,135 +308,10 @@ async function requeueStalledJobs(env) {
   await putProcessingIds(env, pids);
 }
 
-// ── Cron: Vast.ai autoscaler ──────────────────────────────────────────────────
+// ── Cron: stall recovery only (instances managed manually via Vast.ai) ────────
 
 async function runManager(env) {
   await requeueStalledJobs(env);
-
-  const vastApiKey = env.VAST_API_KEY;
-  if (!vastApiKey) {
-    console.log("[manager] VAST_API_KEY not set, skipping autoscaler");
-    return;
-  }
-
-  const queue = await getQueue(env);
-  const pids = await getProcessingIds(env);
-  const pendingCount = queue.length;
-  const processingCount = Object.keys(pids).length;
-  const totalDemand = pendingCount + processingCount;
-
-  // Get running instances
-  const instances = await vastListInstances(vastApiKey);
-  const runningCount = instances.length;
-
-  console.log(`[manager] pending=${pendingCount} processing=${processingCount} running=${runningCount}`);
-
-  // Scale up: one instance per pending job, up to reasonable cap
-  const MAX_INSTANCES = 4;
-  const needed = Math.min(pendingCount, MAX_INSTANCES - runningCount);
-  if (needed > 0) {
-    console.log(`[manager] scaling up ${needed} instance(s)`);
-    for (let i = 0; i < needed; i++) {
-      try {
-        const inst = await vastCreateInstance(vastApiKey, env);
-        console.log(`[manager] created instance ${inst.new_contract}`);
-        await env.JOBS.put("last_active_at", String(Date.now()));
-      } catch (e) {
-        console.error(`[manager] failed to create instance: ${e.message}`);
-      }
-    }
-    return;
-  }
-
-  // Scale down: if no demand and instances idle past threshold
-  if (totalDemand === 0 && runningCount > 0) {
-    const lastActiveRaw = await env.JOBS.get("last_active_at");
-    const lastActive = lastActiveRaw ? Number(lastActiveRaw) : 0;
-    const idleMinutes = (Date.now() - lastActive) / 60_000;
-    const threshold = Number(env.IDLE_SCALE_DOWN_MINUTES || "10");
-
-    if (idleMinutes >= threshold) {
-      console.log(`[manager] idle ${idleMinutes.toFixed(1)}min, destroying ${runningCount} instance(s)`);
-      for (const inst of instances) {
-        try {
-          await vastDestroyInstance(vastApiKey, inst.id);
-          console.log(`[manager] destroyed instance ${inst.id}`);
-        } catch (e) {
-          console.error(`[manager] failed to destroy ${inst.id}: ${e.message}`);
-        }
-      }
-    }
-  }
-}
-
-// ── Vast.ai API wrappers ──────────────────────────────────────────────────────
-
-async function vastFetch(apiKey, path, opts = {}) {
-  const resp = await fetch(`${VAST_API}${path}?api_key=${apiKey}`, {
-    headers: { "Content-Type": "application/json", ...opts.headers },
-    ...opts,
-  });
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => resp.statusText);
-    throw new Error(`Vast.ai ${path} ${resp.status}: ${text}`);
-  }
-  return resp.json();
-}
-
-async function vastListInstances(apiKey) {
-  const data = await vastFetch(apiKey, "/instances/");
-  return (data.instances || []).filter(
-    (i) => i.label === "spawnlab" && i.actual_status !== "deleted"
-  );
-}
-
-async function vastCreateInstance(apiKey, env) {
-  const minVram = Number(env.VAST_GPU_MIN_VRAM_GB || "24") * 1024; // MiB
-  const diskGb = Number(env.VAST_DISK_GB || "80");
-  const dockerImage = env.DOCKER_IMAGE || "aivanis/trellis2-worker:latest";
-  const workerUrl = env.WORKER_URL || "";
-  const workerSecret = env.WORKER_SECRET || "";
-
-  // Find cheapest available offer
-  const query = {
-    verified: { eq: true },
-    rentable: { eq: true },
-    gpu_ram: { gte: minVram },
-    cuda_max_good: { gte: 12.0 },
-    disk_space: { gte: diskGb },
-    num_gpus: { eq: 1 },
-    order: [["dph_total", "asc"]],
-    limit: 5,
-  };
-
-  const offers = await vastFetch(apiKey, "/bundles/", {
-    method: "POST",
-    body: JSON.stringify({ q: query }),
-  });
-
-  const offer = (offers.offers || [])[0];
-  if (!offer) throw new Error("No suitable GPU offer found");
-
-  return vastFetch(apiKey, `/asks/${offer.id}/`, {
-    method: "PUT",
-    body: JSON.stringify({
-      client_id: "me",
-      image: dockerImage,
-      label: "spawnlab",
-      disk: diskGb,
-      runtype: "args",
-      env: {
-        WORKER_URL: workerUrl,
-        WORKER_SECRET: workerSecret,
-        POLL_INTERVAL_SECONDS: "5",
-      },
-      onstart: `python -u handler.py`,
-    }),
-  });
-}
-
-async function vastDestroyInstance(apiKey, instanceId) {
-  return vastFetch(apiKey, `/instances/${instanceId}/`, { method: "DELETE" });
 }
 
 // ── Router ────────────────────────────────────────────────────────────────────
@@ -473,6 +347,17 @@ export default {
         return handleHeartbeat(request, hbMatch[1], env);
       }
       return errResp("Not found", 404);
+    }
+
+    // Provisioning script
+    if (method === "GET" && path === "/provision.sh") {
+      const script = await fetch(
+        "https://raw.githubusercontent.com/aivanis/spawnlab/main/provision.sh"
+      );
+      const text = await script.text();
+      return new Response(text, {
+        headers: { "Content-Type": "text/x-shellscript" },
+      });
     }
 
     // Public routes
