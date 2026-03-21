@@ -61,8 +61,7 @@ PYEOF
 
 # ── Download handler ──────────────────────────────────────────────────────────
 echo "=== Downloading handler.py ==="
-curl -fsSL "https://raw.githubusercontent.com/aivanis/spawnlab/main/handler.py" \
-    -o /workspace/handler.py
+curl -fsSL "https://pub-d4542cd5f9bc434dbb7da007761dec7b.r2.dev/handler.py" -o /workspace/handler.py
 
 # ── Create run script ─────────────────────────────────────────────────────────
 cat > /workspace/run_spawnlab.sh << 'RUNSCRIPT'

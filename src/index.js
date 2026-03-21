@@ -1,5 +1,5 @@
 /**
- * Protomesh Cloudflare Worker
+ * SpawnLab Cloudflare Worker
  *
  * Public API:
  *   POST /generate               { image: <base64>, resolution?, seed?, decimation_target?, texture_size?, remove_bg? }
@@ -349,15 +349,12 @@ export default {
       return errResp("Not found", 404);
     }
 
-    // Provisioning script
-    if (method === "GET" && path === "/provision.sh") {
-      const script = await fetch(
-        "https://raw.githubusercontent.com/aivanis/spawnlab/main/provision.sh"
+    // Provisioning script + handler (served from R2 public bucket)
+    if (method === "GET" && (path === "/provision.sh" || path === "/handler.py")) {
+      return Response.redirect(
+        `https://pub-d4542cd5f9bc434dbb7da007761dec7b.r2.dev${path}`,
+        302
       );
-      const text = await script.text();
-      return new Response(text, {
-        headers: { "Content-Type": "text/x-shellscript" },
-      });
     }
 
     // Public routes
