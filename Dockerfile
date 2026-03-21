@@ -1,5 +1,10 @@
 FROM runpod/pytorch:1.0.3-cu1281-torch260-ubuntu2404
 
+# HuggingFace token — required for gated models (facebook/dinov3-vitl16-pretrain-lvd1689m)
+# Pass at build time: docker build --build-arg HF_TOKEN=hf_xxx ...
+ARG HF_TOKEN
+ENV HF_TOKEN=${HF_TOKEN}
+
 ENV DEBIAN_FRONTEND=noninteractive
 ENV OPENCV_IO_ENABLE_OPENEXR=1
 ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
