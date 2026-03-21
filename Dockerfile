@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y \
 RUN pip install --no-cache-dir \
     imageio imageio-ffmpeg tqdm easydict opencv-python-headless \
     trimesh transformers zstandard kornia timm \
-    plyfile runpod requests hf_transfer huggingface_hub
+    plyfile requests hf_transfer huggingface_hub
 
 RUN pip install git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8
 

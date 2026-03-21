@@ -1,5 +1,5 @@
 """
-Test script for the trellis2-worker RunPod endpoint.
+Test script for the Protomesh Cloudflare Worker endpoint.
 
 Usage:
     python test_endpoint.py [image_path] [--resolution 512|1024|1536]
@@ -24,16 +24,14 @@ from PIL import Image, ImageDraw
 
 load_dotenv()
 
-API_KEY     = os.environ.get("RUNPOD_API_KEY")
-ENDPOINT_ID = os.environ.get("RUNPOD_ENDPOINT_ID")
+WORKER_URL = os.environ.get("WORKER_URL", "").rstrip("/")
 
-if not API_KEY or not ENDPOINT_ID:
-    print("ERROR: Set RUNPOD_API_KEY and RUNPOD_ENDPOINT_ID in a .env file.")
+if not WORKER_URL:
+    print("ERROR: Set WORKER_URL in a .env file.")
     print("       Copy .env.template to .env and fill in your values.")
     sys.exit(1)
 
-BASE_URL = f"https://api.runpod.io/v2/{ENDPOINT_ID}"
-HEADERS  = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+HEADERS = {"Content-Type": "application/json"}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -54,16 +52,16 @@ def synthetic_image_b64() -> str:
     img.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode()
 
-def poll_job(job_id: str, timeout: int = 600) -> dict:
+def poll_status(job_id: str, timeout: int = 600) -> dict:
     deadline = time.time() + timeout
     print(f"  Job ID: {job_id}  (polling every 5s, timeout {timeout}s)")
     while time.time() < deadline:
-        resp = requests.get(f"{BASE_URL}/status/{job_id}", headers=HEADERS, timeout=30)
+        resp = requests.get(f"{WORKER_URL}/status/{job_id}", timeout=30)
         resp.raise_for_status()
         data = resp.json()
-        status = data.get("status", "UNKNOWN")
-        print(f"  Status: {status}", end="\r")
-        if status in ("COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"):
+        status = data.get("status", "unknown")
+        print(f"  Status: {status}    ", end="\r")
+        if status in ("completed", "failed"):
             print()
             return data
         time.sleep(5)
@@ -73,7 +71,7 @@ def poll_job(job_id: str, timeout: int = 600) -> dict:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Test the trellis2-worker RunPod endpoint")
+    parser = argparse.ArgumentParser(description="Test the Protomesh Worker endpoint")
     parser.add_argument("image", nargs="?", help="Path to input image (PNG/JPG). Omit to use a synthetic test image.")
     parser.add_argument("--resolution", choices=["512", "1024", "1536"], default="512",
                         help="Output resolution (default: 512, fastest for testing)")
@@ -83,8 +81,6 @@ def main():
                         help="Texture atlas size in px (default: 1024)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no-rembg", action="store_true", help="Skip background removal")
-    parser.add_argument("--async-mode", action="store_true",
-                        help="Submit async job and poll (use for long runs)")
     parser.add_argument("--output", default="output.glb", help="Path to save the output GLB")
     args = parser.parse_args()
 
@@ -97,61 +93,44 @@ def main():
         img_b64 = synthetic_image_b64()
 
     payload = {
-        "input": {
-            "image":            img_b64,
-            "resolution":       int(args.resolution),
-            "decimation_target": args.decimation,
-            "texture_size":     args.texture_size,
-            "seed":             args.seed,
-            "remove_bg":        not args.no_rembg,
-        }
+        "image":            img_b64,
+        "resolution":       int(args.resolution),
+        "decimation_target": args.decimation,
+        "texture_size":     args.texture_size,
+        "seed":             args.seed,
+        "remove_bg":        not args.no_rembg,
     }
 
-    print(f"\nEndpoint: {ENDPOINT_ID}")
+    print(f"\nEndpoint: {WORKER_URL}")
     print(f"Resolution: {args.resolution}  |  Decimation: {args.decimation}  |  Texture: {args.texture_size}px\n")
 
     t0 = time.time()
 
-    if args.async_mode:
-        # Submit and poll
-        print("Submitting async job...")
-        resp = requests.post(f"{BASE_URL}/run", headers=HEADERS, json=payload, timeout=30)
-        resp.raise_for_status()
-        job_id = resp.json()["id"]
-        result = poll_job(job_id)
-        output = result.get("output", {})
-    else:
-        # Synchronous call (waits up to 5 min)
-        print("Submitting synchronous job (waiting for result)...")
-        print("  Note: first call may take 2-3 min due to cold start.")
-        resp = requests.post(f"{BASE_URL}/runsync", headers=HEADERS, json=payload, timeout=600)
-        resp.raise_for_status()
-        result = resp.json()
-        output = result.get("output", {})
+    # Submit job
+    print("Submitting job...")
+    resp = requests.post(f"{WORKER_URL}/generate", headers=HEADERS, json=payload, timeout=60)
+    resp.raise_for_status()
+    job = resp.json()
+    job_id = job["id"]
 
+    # Poll until done
+    result = poll_status(job_id)
     elapsed = time.time() - t0
 
-    # Handle result
-    if "error" in output:
-        print(f"\nWORKER ERROR: {output['error']}")
+    if result.get("status") == "failed":
+        print(f"\nJOB FAILED: {result.get('error', 'unknown error')}")
         sys.exit(1)
 
-    if result.get("status") in ("FAILED", "CANCELLED", "TIMED_OUT"):
-        print(f"\nJOB {result['status']}")
-        print(json.dumps(result, indent=2))
-        sys.exit(1)
+    # Download GLB
+    print("Downloading result...")
+    dl = requests.get(f"{WORKER_URL}/result/{job_id}", timeout=120, stream=True)
+    dl.raise_for_status()
 
-    if "glb" not in output:
-        print("\nUnexpected response:")
-        print(json.dumps(result, indent=2))
-        sys.exit(1)
-
-    # Save GLB
-    glb_bytes = base64.b64decode(output["glb"])
+    glb_bytes = dl.content
     with open(args.output, "wb") as f:
         f.write(glb_bytes)
 
-    print(f"SUCCESS in {elapsed:.1f}s")
+    print(f"\nSUCCESS in {elapsed:.1f}s")
     print(f"GLB saved to: {args.output}  ({len(glb_bytes) / 1024:.0f} KB)")
     print(f"\nOpen in Blender or drag into https://gltf.report to inspect.")
 

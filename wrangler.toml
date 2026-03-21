@@ -1,0 +1,26 @@
+name = "spawnlab-worker"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[kv_namespaces]]
+binding = "JOBS"
+id = "<KV_NAMESPACE_ID>"
+preview_id = "<KV_PREVIEW_ID>"
+
+[[r2_buckets]]
+binding = "ASSETS"
+bucket_name = "spawnlab-assets"
+
+[triggers]
+crons = ["* * * * *"]
+
+[vars]
+VAST_GPU_MIN_VRAM_GB = "24"
+VAST_DISK_GB = "80"
+IDLE_SCALE_DOWN_MINUTES = "10"
+DOCKER_IMAGE = "aivanis/trellis2-worker:latest"
+
+# Secrets (set via: wrangler secret put <NAME>)
+# WORKER_SECRET  — shared secret between CF Worker and GPU workers
+# VAST_API_KEY   — Vast.ai API key

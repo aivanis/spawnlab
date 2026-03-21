@@ -1,11 +1,11 @@
-import os, gc, base64, io, tempfile, uuid
+import os, gc, base64, io, time, threading, uuid
 os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 os.environ['HF_HOME'] = '/app/cache'
 
 import numpy as np
 import torch
-import runpod
+import requests as _requests
 from PIL import Image, ImageOps
 from torch.amp import autocast
 from torchvision import transforms
@@ -163,39 +163,63 @@ def preprocess_image(image: Image.Image, remove_bg: bool = True) -> Image.Image:
     arr[:, :, :3] *= arr[:, :, 3:4]
     return Image.fromarray((arr * 255).astype(np.uint8))
 
-# ── RunPod handler ────────────────────────────────────────────────────────────
+# ── Polling config ────────────────────────────────────────────────────────────
 
-def handler(job):
-    job_input = job["input"]
+WORKER_URL    = os.environ.get("WORKER_URL", "").rstrip("/")
+WORKER_SECRET = os.environ.get("WORKER_SECRET", "")
+INSTANCE_ID   = os.environ.get("VAST_INSTANCE_ID", f"vast-{uuid.uuid4().hex[:8]}")
+POLL_INTERVAL = float(os.environ.get("POLL_INTERVAL_SECONDS", "5"))
 
-    # --- Decode image ---
-    image_b64 = job_input.get("image")
-    if not image_b64:
-        return {"error": "Missing required field: image (base64 encoded PNG/JPG)"}
+_AUTH = {"Authorization": f"Bearer {WORKER_SECRET}", "Content-Type": "application/json"}
 
+# ── Core job processor ────────────────────────────────────────────────────────
+
+def process_job(job_id: str, params: dict) -> None:
+    """Run inference for one job and POST the result (or failure) back."""
+
+    resolution  = str(params.get("resolution", 1024))
+    seed        = params.get("seed", 42)
+    decimation  = params.get("decimation_target", 300000)
+    texture_size = params.get("texture_size", 2048)
+    remove_bg   = params.get("remove_bg", True)
+
+    def _fail(msg):
+        try:
+            _requests.post(
+                f"{WORKER_URL}/internal/fail/{job_id}",
+                headers=_AUTH, json={"error": msg}, timeout=30,
+            )
+        except Exception as e:
+            print(f"[worker] failed to report failure for {job_id}: {e}")
+
+    # --- Fetch image from CF Worker ---
     try:
-        image = Image.open(io.BytesIO(base64.b64decode(image_b64))).convert("RGBA")
+        img_resp = _requests.get(
+            f"{WORKER_URL}/internal/image/{job_id}",
+            headers={"Authorization": f"Bearer {WORKER_SECRET}"},
+            timeout=60,
+        )
+        img_resp.raise_for_status()
+        image = Image.open(io.BytesIO(img_resp.content)).convert("RGBA")
     except Exception as e:
-        return {"error": f"Failed to decode image: {e}"}
+        _fail(f"Failed to fetch image: {e}")
+        return
 
-    # --- Parameters ---
-    resolution = str(job_input.get("resolution", 1024))
+    # --- Validate resolution ---
     if resolution not in ("512", "1024", "1536"):
-        return {"error": "resolution must be 512, 1024, or 1536"}
+        _fail("resolution must be 512, 1024, or 1536")
+        return
 
     pipeline_type = {"512": "512", "1024": "1024_cascade", "1536": "1536_cascade"}[resolution]
-    seed            = job_input.get("seed", 42)
-    decimation      = job_input.get("decimation_target", 300000)
-    texture_size    = job_input.get("texture_size", 2048)
-    remove_bg       = job_input.get("remove_bg", True)
 
     # --- Preprocess ---
     try:
         image = preprocess_image(image, remove_bg=remove_bg)
     except Exception as e:
-        return {"error": f"Preprocessing failed: {e}"}
+        _fail(f"Preprocessing failed: {e}")
+        return
 
-    # --- Inference (two-step: latent → mesh) ---
+    # --- Inference ---
     gc.collect()
     torch.cuda.empty_cache()
 
@@ -208,7 +232,8 @@ def handler(job):
             return_latent=True,
         )
     except Exception as e:
-        return {"error": f"Inference failed: {e}"}
+        _fail(f"Inference failed: {e}")
+        return
 
     del outputs
     gc.collect()
@@ -220,15 +245,15 @@ def handler(job):
         mesh = pipeline.decode_latent(shape_slat, tex_slat, res)[0]
         mesh.simplify(16777216)
     except Exception as e:
-        return {"error": f"Mesh decode failed: {e}"}
+        _fail(f"Mesh decode failed: {e}")
+        del latents
+        return
 
     del latents, shape_slat, tex_slat
     gc.collect()
     torch.cuda.empty_cache()
 
     # --- Export GLB ---
-    # remesh=True runs CuMesh cleanup for better topology; fall back to False
-    # if it fails (e.g. degenerate mesh from simple input, CUDA config error).
     def _to_glb(remesh):
         return o_voxel.postprocess.to_glb(
             vertices=mesh.vertices,
@@ -254,18 +279,86 @@ def handler(job):
 
         tmp_path = f"/tmp/trellis_{uuid.uuid4().hex[:8]}.glb"
         glb.export(tmp_path, extension_webp=True)
-
         with open(tmp_path, "rb") as f:
-            glb_b64 = base64.b64encode(f.read()).decode("utf-8")
+            glb_bytes = f.read()
         os.unlink(tmp_path)
     except Exception as e:
-        return {"error": f"GLB export failed: {e}"}
+        _fail(f"GLB export failed: {e}")
+        del mesh
+        return
 
     del mesh, glb
     gc.collect()
     torch.cuda.empty_cache()
 
-    return {"glb": glb_b64}
+    # --- Upload result ---
+    try:
+        up = _requests.post(
+            f"{WORKER_URL}/internal/result/{job_id}",
+            headers={"Authorization": f"Bearer {WORKER_SECRET}",
+                     "Content-Type": "application/octet-stream"},
+            data=glb_bytes,
+            timeout=120,
+        )
+        up.raise_for_status()
+        print(f"[worker] job {job_id} done — {len(glb_bytes) // 1024} KB")
+    except Exception as e:
+        _fail(f"Failed to upload result: {e}")
 
 
-runpod.serverless.start({"handler": handler})
+# ── Polling loop ──────────────────────────────────────────────────────────────
+
+def run_polling_loop():
+    if not WORKER_URL or not WORKER_SECRET:
+        raise RuntimeError("WORKER_URL and WORKER_SECRET must be set")
+
+    print(f"[worker] starting — url={WORKER_URL}  id={INSTANCE_ID}")
+
+    while True:
+        try:
+            resp = _requests.post(
+                f"{WORKER_URL}/internal/claim",
+                headers=_AUTH,
+                json={"worker_id": INSTANCE_ID},
+                timeout=30,
+            )
+
+            if resp.status_code == 204:
+                # No work available
+                time.sleep(POLL_INTERVAL)
+                continue
+
+            resp.raise_for_status()
+            job = resp.json()
+            job_id = job["job_id"]
+            params  = job["params"]
+            print(f"[worker] claimed job {job_id}")
+
+            # Heartbeat thread — keeps job alive while we process
+            stop_hb = threading.Event()
+            def _heartbeat():
+                while not stop_hb.wait(30):
+                    try:
+                        _requests.post(
+                            f"{WORKER_URL}/internal/heartbeat/{job_id}",
+                            headers=_AUTH,
+                            json={"worker_id": INSTANCE_ID},
+                            timeout=15,
+                        )
+                    except Exception:
+                        pass
+            hb_thread = threading.Thread(target=_heartbeat, daemon=True)
+            hb_thread.start()
+
+            try:
+                process_job(job_id, params)
+            finally:
+                stop_hb.set()
+
+        except Exception as e:
+            print(f"[worker] poll error: {e}")
+            time.sleep(POLL_INTERVAL)
+
+
+if __name__ == "__main__":
+    run_polling_loop()
