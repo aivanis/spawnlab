@@ -3,8 +3,10 @@
 # Usage: set PROVISIONING_SCRIPT to the URL of this file in your Vast.ai template
 #
 # Required env vars (set in Vast.ai template):
-#   WORKER_URL     - https://spawnlab-worker.anivanis.workers.dev
-#   WORKER_SECRET  - shared secret
+#   CLAIM_JOB_URL          - https://<region>-<project>.cloudfunctions.net/claimJob
+#   WORKER_SECRET          - shared secret
+#   FIREBASE_STORAGE_BUCKET - <project>.firebasestorage.app
+#   GOOGLE_APPLICATION_CREDENTIALS - /workspace/service_account.json
 
 set -euo pipefail
 
@@ -26,7 +28,7 @@ apt-get install -y --no-install-recommends \
 pip install --no-cache-dir \
     imageio imageio-ffmpeg tqdm easydict opencv-python-headless \
     trimesh transformers zstandard kornia timm \
-    plyfile requests hf_transfer huggingface_hub
+    plyfile requests hf_transfer huggingface_hub firebase-admin
 
 pip install --no-cache-dir \
     git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8

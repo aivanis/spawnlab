@@ -1,4 +1,4 @@
-import os, gc, base64, io, time, threading, uuid
+import os, gc, io, time, threading, uuid
 os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 os.environ['HF_HOME'] = '/app/cache'
@@ -6,6 +6,8 @@ os.environ['HF_HOME'] = '/app/cache'
 import numpy as np
 import torch
 import requests as _requests
+import firebase_admin
+from firebase_admin import credentials, firestore, storage
 from PIL import Image, ImageOps
 from torch.amp import autocast
 from torchvision import transforms
@@ -163,44 +165,47 @@ def preprocess_image(image: Image.Image, remove_bg: bool = True) -> Image.Image:
     arr[:, :, :3] *= arr[:, :, 3:4]
     return Image.fromarray((arr * 255).astype(np.uint8))
 
-# ── Polling config ────────────────────────────────────────────────────────────
+# ── Firebase init ─────────────────────────────────────────────────────────────
 
-WORKER_URL    = os.environ.get("WORKER_URL", "").rstrip("/")
+CLAIM_JOB_URL = os.environ.get("CLAIM_JOB_URL", "").rstrip("/")
 WORKER_SECRET = os.environ.get("WORKER_SECRET", "")
 INSTANCE_ID   = os.environ.get("VAST_INSTANCE_ID", f"vast-{uuid.uuid4().hex[:8]}")
 POLL_INTERVAL = float(os.environ.get("POLL_INTERVAL_SECONDS", "5"))
+STORAGE_BUCKET = os.environ.get("FIREBASE_STORAGE_BUCKET", "")
 
-_AUTH = {"Authorization": f"Bearer {WORKER_SECRET}", "Content-Type": "application/json"}
+_cred = credentials.ApplicationDefault()
+firebase_admin.initialize_app(_cred, {"storageBucket": STORAGE_BUCKET})
+_db     = firestore.client()
+_bucket = storage.bucket()
+
+_CLAIM_HEADERS = {
+    "Authorization": f"Bearer {WORKER_SECRET}",
+    "Content-Type": "application/json",
+}
 
 # ── Core job processor ────────────────────────────────────────────────────────
 
 def process_job(job_id: str, params: dict) -> None:
-    """Run inference for one job and POST the result (or failure) back."""
-
-    resolution  = str(params.get("resolution", 1024))
-    seed        = params.get("seed", 42)
-    decimation  = params.get("decimation_target", 300000)
+    resolution   = str(params.get("resolution", 1024))
+    seed         = params.get("seed", 42)
+    decimation   = params.get("decimation_target", 300000)
     texture_size = params.get("texture_size", 2048)
-    remove_bg   = params.get("remove_bg", True)
+    remove_bg    = params.get("remove_bg", True)
+
+    job_ref = _db.collection("jobs").document(job_id)
 
     def _fail(msg):
-        try:
-            _requests.post(
-                f"{WORKER_URL}/internal/fail/{job_id}",
-                headers=_AUTH, json={"error": msg}, timeout=30,
-            )
-        except Exception as e:
-            print(f"[worker] failed to report failure for {job_id}: {e}")
+        print(f"[worker] job {job_id} failed: {msg}")
+        job_ref.update({
+            "status": "failed",
+            "error": msg,
+            "updated_at": firestore.SERVER_TIMESTAMP,
+        })
 
-    # --- Fetch image from CF Worker ---
+    # --- Fetch image from Firebase Storage ---
     try:
-        img_resp = _requests.get(
-            f"{WORKER_URL}/internal/image/{job_id}",
-            headers={"Authorization": f"Bearer {WORKER_SECRET}"},
-            timeout=60,
-        )
-        img_resp.raise_for_status()
-        image = Image.open(io.BytesIO(img_resp.content)).convert("RGBA")
+        blob = _bucket.blob(f"inputs/{job_id}.png")
+        image = Image.open(io.BytesIO(blob.download_as_bytes())).convert("RGBA")
     except Exception as e:
         _fail(f"Failed to fetch image: {e}")
         return
@@ -291,64 +296,59 @@ def process_job(job_id: str, params: dict) -> None:
     gc.collect()
     torch.cuda.empty_cache()
 
-    # --- Upload result ---
+    # --- Upload GLB to Firebase Storage ---
     try:
-        up = _requests.post(
-            f"{WORKER_URL}/internal/result/{job_id}",
-            headers={"Authorization": f"Bearer {WORKER_SECRET}",
-                     "Content-Type": "application/octet-stream"},
-            data=glb_bytes,
-            timeout=120,
-        )
-        up.raise_for_status()
+        blob = _bucket.blob(f"results/{job_id}.glb")
+        blob.upload_from_string(glb_bytes, content_type="model/gltf-binary")
         print(f"[worker] job {job_id} done — {len(glb_bytes) // 1024} KB")
     except Exception as e:
         _fail(f"Failed to upload result: {e}")
+        return
+
+    # --- Mark completed ---
+    job_ref.update({
+        "status": "completed",
+        "updated_at": firestore.SERVER_TIMESTAMP,
+    })
 
 
 # ── Polling loop ──────────────────────────────────────────────────────────────
 
 def run_polling_loop():
-    if not WORKER_URL or not WORKER_SECRET:
-        raise RuntimeError("WORKER_URL and WORKER_SECRET must be set")
+    if not CLAIM_JOB_URL or not WORKER_SECRET:
+        raise RuntimeError("CLAIM_JOB_URL and WORKER_SECRET must be set")
 
-    print(f"[worker] starting — url={WORKER_URL}  id={INSTANCE_ID}")
+    print(f"[worker] starting — id={INSTANCE_ID}")
 
     while True:
         try:
             resp = _requests.post(
-                f"{WORKER_URL}/internal/claim",
-                headers=_AUTH,
+                CLAIM_JOB_URL,
+                headers=_CLAIM_HEADERS,
                 json={"worker_id": INSTANCE_ID},
                 timeout=30,
             )
 
             if resp.status_code == 204:
-                # No work available
                 time.sleep(POLL_INTERVAL)
                 continue
 
             resp.raise_for_status()
             job = resp.json()
             job_id = job["job_id"]
-            params  = job["params"]
+            params = job["params"]
             print(f"[worker] claimed job {job_id}")
 
-            # Heartbeat thread — keeps job alive while we process
+            # Heartbeat thread
+            job_ref = _db.collection("jobs").document(job_id)
             stop_hb = threading.Event()
-            def _heartbeat():
+            def _heartbeat(ref=job_ref):
                 while not stop_hb.wait(30):
                     try:
-                        _requests.post(
-                            f"{WORKER_URL}/internal/heartbeat/{job_id}",
-                            headers=_AUTH,
-                            json={"worker_id": INSTANCE_ID},
-                            timeout=15,
-                        )
+                        ref.update({"heartbeat_at": firestore.SERVER_TIMESTAMP})
                     except Exception:
                         pass
-            hb_thread = threading.Thread(target=_heartbeat, daemon=True)
-            hb_thread.start()
+            threading.Thread(target=_heartbeat, daemon=True).start()
 
             try:
                 process_job(job_id, params)
