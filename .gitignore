@@ -5,3 +5,4 @@ __pycache__/
 *.glb
 *.mp4
 wheels/
+functions/node_modules/
