@@ -12,7 +12,7 @@ const db = admin.firestore();
 // Response 200: { job_id, params }
 // Response 204: no pending jobs
 
-exports.claimJob = onRequest({ secrets: ["WORKER_SECRET"] }, async (req, res) => {
+exports.claimJob = onRequest({ secrets: ["WORKER_SECRET"], invoker: "public" }, async (req, res) => {
   if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
   const auth = req.headers.authorization || "";
