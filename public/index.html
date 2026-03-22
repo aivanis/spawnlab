@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SpawnLab</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0d1117; color: #e6edf3; min-height: 100vh; }
+  a { color: #58a6ff; }
+  button { cursor: pointer; border: none; border-radius: 6px; padding: 8px 16px; font-size: 14px; font-weight: 500; }
+  .btn-primary { background: #238636; color: #fff; }
+  .btn-primary:hover { background: #2ea043; }
+  .btn-danger { background: #da3633; color: #fff; }
+  .btn-secondary { background: #21262d; color: #e6edf3; border: 1px solid #30363d; }
+  .btn-secondary:hover { background: #30363d; }
+
+  /* Header */
+  header { display: flex; align-items: center; justify-content: space-between; padding: 12px 24px; background: #161b22; border-bottom: 1px solid #30363d; }
+  header h1 { font-size: 20px; font-weight: 600; }
+  .user-info { display: flex; align-items: center; gap: 12px; }
+  .user-info img { width: 32px; height: 32px; border-radius: 50%; }
+
+  /* Auth screen */
+  #auth-screen { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 80vh; gap: 24px; }
+  #auth-screen h2 { font-size: 28px; }
+  #auth-screen button { padding: 12px 32px; font-size: 16px; }
+
+  /* Main */
+  main { max-width: 960px; margin: 0 auto; padding: 24px; }
+
+  /* Upload area */
+  .upload-section { margin-bottom: 32px; padding: 20px; background: #161b22; border: 1px solid #30363d; border-radius: 8px; }
+  .upload-section h3 { margin-bottom: 12px; }
+  .upload-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .upload-row input[type="file"] { flex: 1; min-width: 200px; }
+  .preview-img { max-width: 80px; max-height: 80px; border-radius: 4px; border: 1px solid #30363d; }
+
+  /* Jobs table */
+  .jobs-section h3 { margin-bottom: 12px; }
+  table { width: 100%; border-collapse: collapse; background: #161b22; border: 1px solid #30363d; border-radius: 8px; overflow: hidden; }
+  th, td { padding: 10px 14px; text-align: left; border-bottom: 1px solid #21262d; font-size: 14px; }
+  th { background: #21262d; font-weight: 600; color: #8b949e; text-transform: uppercase; font-size: 12px; }
+  tr:last-child td { border-bottom: none; }
+
+  /* Status badges */
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+  .badge-pending { background: #d29922; color: #000; }
+  .badge-processing { background: #1f6feb; color: #fff; }
+  .badge-done { background: #238636; color: #fff; }
+  .badge-failed { background: #da3633; color: #fff; }
+
+  .empty-state { text-align: center; padding: 40px; color: #8b949e; }
+  .error-msg { color: #f85149; font-size: 13px; margin-top: 8px; }
+  .dl-link { color: #58a6ff; text-decoration: none; }
+  .dl-link:hover { text-decoration: underline; }
+  .job-id { font-family: monospace; font-size: 12px; color: #8b949e; }
+  .time-col { font-size: 12px; color: #8b949e; white-space: nowrap; }
+</style>
+</head>
+<body>
+
+<!-- Auth screen -->
+<div id="auth-screen" style="display:none">
+  <h2>SpawnLab</h2>
+  <p style="color:#8b949e">Image-to-3D mesh generation</p>
+  <button class="btn-primary" id="login-btn">Sign in with Google</button>
+</div>
+
+<!-- App -->
+<div id="app" style="display:none">
+  <header>
+    <h1>SpawnLab</h1>
+    <div class="user-info">
+      <span id="user-email"></span>
+      <img id="user-avatar" src="" alt="">
+      <button class="btn-secondary" id="logout-btn">Sign out</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- Upload -->
+    <div class="upload-section">
+      <h3>New Job</h3>
+      <div class="upload-row">
+        <input type="file" id="image-input" accept="image/png,image/jpeg,image/webp">
+        <img id="preview" class="preview-img" style="display:none">
+        <button class="btn-primary" id="submit-btn" disabled>Submit Job</button>
+      </div>
+      <div id="upload-error" class="error-msg"></div>
+    </div>
+
+    <!-- Jobs -->
+    <div class="jobs-section">
+      <h3>Jobs</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Status</th>
+            <th>Created</th>
+            <th>Worker</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="jobs-body">
+          <tr><td colspan="5" class="empty-state">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </main>
+</div>
+
+<!-- Firebase SDK -->
+<script type="module">
+  import { initializeApp } from 'https://www.gstatic.com/firebasejs/11.7.1/firebase-app.js';
+  import { getAuth, signInWithPopup, GoogleAuthProvider, onAuthStateChanged, signOut } from 'https://www.gstatic.com/firebasejs/11.7.1/firebase-auth.js';
+  import { getFirestore, collection, query, orderBy, onSnapshot, addDoc, serverTimestamp, doc, deleteDoc } from 'https://www.gstatic.com/firebasejs/11.7.1/firebase-firestore.js';
+  import { getStorage, ref, uploadBytes, getDownloadURL } from 'https://www.gstatic.com/firebasejs/11.7.1/firebase-storage.js';
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyAwXCS_HOfR9o2EG6pUzm8l0cMsII-ZQVg",
+    authDomain: "spawnlab-53283.firebaseapp.com",
+    projectId: "spawnlab-53283",
+    storageBucket: "spawnlab-53283.firebasestorage.app",
+    messagingSenderId: "702083147799",
+    appId: "1:702083147799:web:135db31b6374c0face1452"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db = getFirestore(app);
+  const storage = getStorage(app);
+  const provider = new GoogleAuthProvider();
+
+  // --- Auth ---
+  const authScreen = document.getElementById('auth-screen');
+  const appDiv = document.getElementById('app');
+
+  onAuthStateChanged(auth, (user) => {
+    if (user) {
+      authScreen.style.display = 'none';
+      appDiv.style.display = 'block';
+      document.getElementById('user-email').textContent = user.email;
+      document.getElementById('user-avatar').src = user.photoURL || '';
+      listenJobs(user);
+    } else {
+      authScreen.style.display = 'flex';
+      appDiv.style.display = 'none';
+    }
+  });
+
+  document.getElementById('login-btn').addEventListener('click', () => {
+    signInWithPopup(auth, provider).catch(e => alert(e.message));
+  });
+
+  document.getElementById('logout-btn').addEventListener('click', () => {
+    signOut(auth);
+  });
+
+  // --- Image preview ---
+  const imageInput = document.getElementById('image-input');
+  const preview = document.getElementById('preview');
+  const submitBtn = document.getElementById('submit-btn');
+
+  imageInput.addEventListener('change', () => {
+    const file = imageInput.files[0];
+    if (file) {
+      preview.src = URL.createObjectURL(file);
+      preview.style.display = 'block';
+      submitBtn.disabled = false;
+    } else {
+      preview.style.display = 'none';
+      submitBtn.disabled = true;
+    }
+  });
+
+  // --- Submit job ---
+  submitBtn.addEventListener('click', async () => {
+    const file = imageInput.files[0];
+    if (!file) return;
+    const user = auth.currentUser;
+    if (!user) return;
+
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Uploading...';
+    const errDiv = document.getElementById('upload-error');
+    errDiv.textContent = '';
+
+    try {
+      // Create Firestore doc first to get the ID
+      const jobRef = await addDoc(collection(db, 'jobs'), {
+        uid: user.uid,
+        status: 'pending',
+        params: {
+          resolution: 512,
+          seed: 42,
+          decimation_target: 100000,
+          texture_size: 1024,
+          remove_bg: true,
+        },
+        created_at: serverTimestamp(),
+        updated_at: serverTimestamp(),
+        heartbeat_at: null,
+        worker_id: null,
+        error: null,
+      });
+
+      // Upload image to Storage
+      const ext = file.name.split('.').pop() || 'png';
+      const storageRef = ref(storage, `inputs/${jobRef.id}.${ext}`);
+      await uploadBytes(storageRef, file, { contentType: file.type });
+
+      // Reset form
+      imageInput.value = '';
+      preview.style.display = 'none';
+    } catch (e) {
+      errDiv.textContent = e.message;
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Submit Job';
+    }
+  });
+
+  // --- Live jobs list ---
+  function listenJobs(user) {
+    const q = query(collection(db, 'jobs'), orderBy('created_at', 'desc'));
+    onSnapshot(q, (snapshot) => {
+      const tbody = document.getElementById('jobs-body');
+      if (snapshot.empty) {
+        tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No jobs yet</td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = '';
+      snapshot.forEach((docSnap) => {
+        const d = docSnap.data();
+        const tr = document.createElement('tr');
+
+        // ID
+        const tdId = document.createElement('td');
+        tdId.className = 'job-id';
+        tdId.textContent = docSnap.id.substring(0, 8) + '...';
+        tdId.title = docSnap.id;
+
+        // Status
+        const tdStatus = document.createElement('td');
+        const badge = document.createElement('span');
+        badge.className = `badge badge-${d.status || 'pending'}`;
+        badge.textContent = d.status || 'pending';
+        tdStatus.appendChild(badge);
+
+        // Time
+        const tdTime = document.createElement('td');
+        tdTime.className = 'time-col';
+        if (d.created_at) {
+          const t = d.created_at.toDate ? d.created_at.toDate() : new Date(d.created_at);
+          tdTime.textContent = t.toLocaleString();
+        }
+
+        // Worker
+        const tdWorker = document.createElement('td');
+        tdWorker.className = 'job-id';
+        tdWorker.textContent = d.worker_id || '-';
+
+        // Actions
+        const tdActions = document.createElement('td');
+        if (d.status === 'done') {
+          const dl = document.createElement('a');
+          dl.className = 'dl-link';
+          dl.textContent = 'Download GLB';
+          dl.href = '#';
+          dl.addEventListener('click', async (e) => {
+            e.preventDefault();
+            try {
+              const glbRef = ref(storage, `outputs/${docSnap.id}.glb`);
+              const url = await getDownloadURL(glbRef);
+              window.open(url, '_blank');
+            } catch (err) {
+              alert('Download failed: ' + err.message);
+            }
+          });
+          tdActions.appendChild(dl);
+        } else if (d.status === 'failed') {
+          const span = document.createElement('span');
+          span.style.color = '#f85149';
+          span.style.fontSize = '12px';
+          span.textContent = d.error || 'Unknown error';
+          span.title = d.error || '';
+          tdActions.appendChild(span);
+        }
+
+        // Delete button for pending jobs
+        if (d.status === 'pending' || d.status === 'failed') {
+          const del = document.createElement('button');
+          del.className = 'btn-danger';
+          del.textContent = 'Delete';
+          del.style.marginLeft = '8px';
+          del.style.padding = '4px 10px';
+          del.style.fontSize = '12px';
+          del.addEventListener('click', async () => {
+            if (confirm('Delete this job?')) {
+              await deleteDoc(doc(db, 'jobs', docSnap.id));
+            }
+          });
+          tdActions.appendChild(del);
+        }
+
+        tr.append(tdId, tdStatus, tdTime, tdWorker, tdActions);
+        tbody.appendChild(tr);
+      });
+    }, (err) => {
+      console.error('Firestore listen error:', err);
+    });
+  }
+</script>
+
+</body>
+</html>

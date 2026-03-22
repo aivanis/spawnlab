@@ -6,8 +6,6 @@ os.environ['HF_HOME'] = '/app/cache'
 import numpy as np
 import torch
 import requests as _requests
-import firebase_admin
-from firebase_admin import credentials, firestore, storage
 from PIL import Image, ImageOps
 from torch.amp import autocast
 from torchvision import transforms
@@ -165,47 +163,44 @@ def preprocess_image(image: Image.Image, remove_bg: bool = True) -> Image.Image:
     arr[:, :, :3] *= arr[:, :, 3:4]
     return Image.fromarray((arr * 255).astype(np.uint8))
 
-# ── Firebase init ─────────────────────────────────────────────────────────────
+# ── Config ────────────────────────────────────────────────────────────────────
 
-CLAIM_JOB_URL = os.environ.get("CLAIM_JOB_URL", "").rstrip("/")
+_BASE_URL     = os.environ.get("CLOUD_FUNCTIONS_URL", "https://us-central1-spawnlab-53283.cloudfunctions.net").rstrip("/")
 WORKER_SECRET = os.environ.get("WORKER_SECRET", "")
 INSTANCE_ID   = os.environ.get("VAST_INSTANCE_ID", f"vast-{uuid.uuid4().hex[:8]}")
 POLL_INTERVAL = float(os.environ.get("POLL_INTERVAL_SECONDS", "5"))
-STORAGE_BUCKET = os.environ.get("FIREBASE_STORAGE_BUCKET", "")
 
-_cred = credentials.ApplicationDefault()
-firebase_admin.initialize_app(_cred, {"storageBucket": STORAGE_BUCKET})
-_db     = firestore.client()
-_bucket = storage.bucket()
-
-_CLAIM_HEADERS = {
+_AUTH_HEADERS = {
     "Authorization": f"Bearer {WORKER_SECRET}",
     "Content-Type": "application/json",
 }
 
+def _api(endpoint, payload):
+    """POST to a Cloud Function endpoint and return the response."""
+    return _requests.post(f"{_BASE_URL}/{endpoint}", headers=_AUTH_HEADERS,
+                          json=payload, timeout=30)
+
 # ── Core job processor ────────────────────────────────────────────────────────
 
-def process_job(job_id: str, params: dict) -> None:
+def process_job(job_id: str, params: dict, image_url: str, upload_url: str) -> None:
     resolution   = str(params.get("resolution", 1024))
     seed         = params.get("seed", 42)
     decimation   = params.get("decimation_target", 300000)
     texture_size = params.get("texture_size", 2048)
     remove_bg    = params.get("remove_bg", True)
 
-    job_ref = _db.collection("jobs").document(job_id)
-
     def _fail(msg):
         print(f"[worker] job {job_id} failed: {msg}")
-        job_ref.update({
-            "status": "failed",
-            "error": msg,
-            "updated_at": firestore.SERVER_TIMESTAMP,
-        })
+        try:
+            _api("failJob", {"job_id": job_id, "error": msg})
+        except Exception:
+            pass
 
-    # --- Fetch image from Firebase Storage ---
+    # --- Fetch image via signed URL ---
     try:
-        blob = _bucket.blob(f"inputs/{job_id}.png")
-        image = Image.open(io.BytesIO(blob.download_as_bytes())).convert("RGBA")
+        resp = _requests.get(image_url, timeout=60)
+        resp.raise_for_status()
+        image = Image.open(io.BytesIO(resp.content)).convert("RGBA")
     except Exception as e:
         _fail(f"Failed to fetch image: {e}")
         return
@@ -296,38 +291,35 @@ def process_job(job_id: str, params: dict) -> None:
     gc.collect()
     torch.cuda.empty_cache()
 
-    # --- Upload GLB to Firebase Storage ---
+    # --- Upload GLB via signed URL ---
     try:
-        blob = _bucket.blob(f"results/{job_id}.glb")
-        blob.upload_from_string(glb_bytes, content_type="model/gltf-binary")
-        print(f"[worker] job {job_id} done — {len(glb_bytes) // 1024} KB")
+        resp = _requests.put(upload_url, data=glb_bytes,
+                             headers={"Content-Type": "model/gltf-binary"}, timeout=120)
+        resp.raise_for_status()
+        print(f"[worker] job {job_id} uploaded — {len(glb_bytes) // 1024} KB")
     except Exception as e:
         _fail(f"Failed to upload result: {e}")
         return
 
     # --- Mark completed ---
-    job_ref.update({
-        "status": "completed",
-        "updated_at": firestore.SERVER_TIMESTAMP,
-    })
+    try:
+        _api("completeJob", {"job_id": job_id})
+        print(f"[worker] job {job_id} done")
+    except Exception as e:
+        print(f"[worker] failed to mark complete: {e}")
 
 
 # ── Polling loop ──────────────────────────────────────────────────────────────
 
 def run_polling_loop():
-    if not CLAIM_JOB_URL or not WORKER_SECRET:
-        raise RuntimeError("CLAIM_JOB_URL and WORKER_SECRET must be set")
+    if not WORKER_SECRET:
+        raise RuntimeError("WORKER_SECRET must be set")
 
-    print(f"[worker] starting — id={INSTANCE_ID}")
+    print(f"[worker] starting — id={INSTANCE_ID}, api={_BASE_URL}")
 
     while True:
         try:
-            resp = _requests.post(
-                CLAIM_JOB_URL,
-                headers=_CLAIM_HEADERS,
-                json={"worker_id": INSTANCE_ID},
-                timeout=30,
-            )
+            resp = _api("claimJob", {"worker_id": INSTANCE_ID})
 
             if resp.status_code == 204:
                 time.sleep(POLL_INTERVAL)
@@ -335,23 +327,28 @@ def run_polling_loop():
 
             resp.raise_for_status()
             job = resp.json()
-            job_id = job["job_id"]
-            params = job["params"]
+            job_id     = job["job_id"]
+            params     = job["params"]
+            image_url  = job.get("image_url")
+            upload_url = job.get("upload_url")
             print(f"[worker] claimed job {job_id}")
 
-            # Heartbeat thread
-            job_ref = _db.collection("jobs").document(job_id)
+            if not image_url or not upload_url:
+                _api("failJob", {"job_id": job_id, "error": "Missing image_url or upload_url"})
+                continue
+
+            # Heartbeat thread — calls Cloud Function every 30s
             stop_hb = threading.Event()
-            def _heartbeat(ref=job_ref):
+            def _heartbeat(jid=job_id):
                 while not stop_hb.wait(30):
                     try:
-                        ref.update({"heartbeat_at": firestore.SERVER_TIMESTAMP})
+                        _api("heartbeat", {"job_id": jid})
                     except Exception:
                         pass
             threading.Thread(target=_heartbeat, daemon=True).start()
 
             try:
-                process_job(job_id, params)
+                process_job(job_id, params, image_url, upload_url)
             finally:
                 stop_hb.set()
 

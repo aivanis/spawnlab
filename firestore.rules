@@ -2,13 +2,16 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     match /jobs/{jobId} {
-      // authenticated users can create and read their own jobs
+      // Admin can read/write all jobs
+      allow read, write: if request.auth != null
+                         && request.auth.token.email == "anivanis@gmail.com";
+
+      // Other authenticated users can create and read their own jobs
       allow create: if request.auth != null
                     && request.resource.data.uid == request.auth.uid
                     && request.resource.data.status == "pending";
       allow read: if request.auth != null
                   && resource.data.uid == request.auth.uid;
-      // workers update via admin SDK (bypasses rules)
     }
   }
 }

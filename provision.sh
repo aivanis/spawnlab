@@ -3,10 +3,8 @@
 # Usage: set PROVISIONING_SCRIPT to the URL of this file in your Vast.ai template
 #
 # Required env vars (set in Vast.ai template):
-#   CLAIM_JOB_URL          - https://<region>-<project>.cloudfunctions.net/claimJob
 #   WORKER_SECRET          - shared secret
-#   FIREBASE_STORAGE_BUCKET - <project>.firebasestorage.app
-#   GOOGLE_APPLICATION_CREDENTIALS - /workspace/service_account.json
+#   CLOUD_FUNCTIONS_URL    - (optional, defaults to https://us-central1-spawnlab-53283.cloudfunctions.net)
 
 set -euo pipefail
 
@@ -28,7 +26,7 @@ apt-get install -y --no-install-recommends \
 pip install --no-cache-dir \
     imageio imageio-ffmpeg tqdm easydict opencv-python-headless \
     trimesh transformers zstandard kornia timm \
-    plyfile requests hf_transfer huggingface_hub firebase-admin
+    plyfile requests hf_transfer huggingface_hub
 
 pip install --no-cache-dir \
     git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8
@@ -61,7 +59,7 @@ PYEOF
 
 # --- Download handler ---
 echo "=== Downloading handler.py ==="
-curl -fsSL "https://pub-d4542cd5f9bc434dbb7da007761dec7b.r2.dev/handler.py" -o /workspace/handler.py
+curl -fsSL "https://storage.googleapis.com/public-spawnlab/handler.py" -o /workspace/handler.py
 
 # --- Create run script ---
 cat > /workspace/run_spawnlab.sh << 'RUNSCRIPT'

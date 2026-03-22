@@ -6,5 +6,15 @@
   "functions": {
     "source": "functions",
     "runtime": "nodejs22"
+  },
+  "storage": {
+    "rules": "storage.rules"
+  },
+  "hosting": {
+    "public": "public",
+    "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
+    "rewrites": [
+      { "source": "**", "destination": "/index.html" }
+    ]
   }
 }
